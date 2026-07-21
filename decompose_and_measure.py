@@ -283,7 +283,7 @@ def method_harris_corner_decomposition(img, debug=False, scale=1.0, unit="px²",
 #  可视化与报告
 # ============================================================================
 
-def draw_results(img, results, show_id=True, show_area=True):
+def draw_results(img, results):
     """在原图上绘制所有检测到的区域和面积标注"""
     canvas = img.copy()
     output = img.copy()
@@ -302,20 +302,27 @@ def draw_results(img, results, show_id=True, show_area=True):
         cv2.drawContours(canvas, [r["contour"]], -1, color, 2)
         cv2.drawContours(output, [r["contour"]], -1, color, 2)
 
-        # 绘制重心
+        # 在重心位置标注排序号（面积从大到小编号）
         if r["centroid"]:
             cx, cy = r["centroid"]
-            cv2.circle(canvas, (cx, cy), 4, color, -1)
-            cv2.circle(output, (cx, cy), 4, color, -1)
+            rank_label = str(r['id'])
 
-            # 标注文本
-            label = f"#{r['id']}"
-            if show_area:
-                label += f" {r['area_str']}"
-            cv2.putText(canvas, label, (cx + 8, cy + 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
-            cv2.putText(canvas, label, (cx + 8, cy + 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            # 绘制半透明背景框使序号更清晰
+            (text_w, text_h), _ = cv2.getTextSize(rank_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            cv2.rectangle(canvas, (cx - text_w // 2 - 3, cy - text_h - 3),
+                          (cx + text_w // 2 + 3, cy + 3), (255, 255, 255), -1)
+            cv2.rectangle(canvas, (cx - text_w // 2 - 3, cy - text_h - 3),
+                          (cx + text_w // 2 + 3, cy + 3), color, 1)
+            cv2.putText(canvas, rank_label, (cx - text_w // 2, cy - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3)
+            cv2.putText(canvas, rank_label, (cx - text_w // 2, cy - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 1)
+
+            # 输出图也保持简洁标注
+            cv2.putText(output, rank_label, (cx - text_w // 2, cy - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3)
+            cv2.putText(output, rank_label, (cx - text_w // 2, cy - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 1)
 
     return canvas, output
 
