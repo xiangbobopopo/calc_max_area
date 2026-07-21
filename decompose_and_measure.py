@@ -52,15 +52,17 @@ def format_area(area_px, scale=1.0, unit="px²"):
 
 def remove_red_circular_markers(img, debug=False, min_radius=5, max_radius_ratio=0.1):
     """
-    预处理：检测红色圆形标识并将其内部（含字母）转换为黑色
-    这些标识通常是设计图中的房间编号、区域标签等，不应被分割为独立区域
+    预处理：检测红色圆形标识并移除其红色边界线
+    这些标识通常是设计图中的房间编号、区域标签等
+
+    原理：红色边界线在 Canny 边缘检测中会形成闭合轮廓，导致内部区域
+         被独立分割。移除红色线后，圆内外连通，字母保持可见。
 
     步骤：
     1. 转换到 HSV 色彩空间
-    2. 创建红色区域掩码（红色在 HSV 中分布在 0° 和 180° 附近）
-    3. 查找红色区域的轮廓
-    4. 根据圆形度过滤，找到圆形标记
-    5. 将圆形内部填充为黑色（使该区域融入周围黑色边缘线）
+    2. 创建红色区域掩码
+    3. 根据圆形度过滤，找到圆形标记
+    4. 仅移除红色边界线（用周围背景色填充），保留内部字母和内容
 
     参数:
         img: 输入图像 (BGR)
@@ -111,16 +113,38 @@ def remove_red_circular_markers(img, debug=False, min_radius=5, max_radius_ratio
 
         if circularity > 0.5 and min_radius < radius < max_radius:
             # 这是一个圆形标记
-            # 将内部填充为黑色（缩小一圈避免覆盖红色边界线）
-            fill_radius = max(int(radius) - 2, 1)
-            cv2.circle(result, (int(x), int(y)), fill_radius, (0, 0, 0), -1)
+            cx, cy, r = int(x), int(y), int(radius)
+
+            # 在圆外部取一个环形区域，采样背景主色
+            outer_ring_mask = np.zeros((h, w), np.uint8)
+            cv2.circle(outer_ring_mask, (cx, cy), r + 3, 255, -1)
+            inner_mask = np.zeros((h, w), np.uint8)
+            cv2.circle(inner_mask, (cx, cy), max(r - 3, 1), 255, -1)
+            bg_sample_mask = cv2.bitwise_xor(outer_ring_mask, inner_mask)
+            bg_sample_mask = cv2.bitwise_and(bg_sample_mask, outer_ring_mask)
+
+            # 采样区域内的平均颜色作为背景色
+            bg_color = cv2.mean(result, mask=bg_sample_mask)[:3]
+            bg_color = tuple(int(c) for c in bg_color)
+
+            # 仅将红色边界线涂成背景色（用红色掩码本身作为边界）
+            # 先取该圆范围内的红色像素
+            circle_roi_mask = np.zeros((h, w), np.uint8)
+            cv2.circle(circle_roi_mask, (cx, cy), r + 1, 255, -1)
+            boundary_mask = cv2.bitwise_and(red_mask, circle_roi_mask)
+
+            # 稍微膨胀确保覆盖完整线条
+            boundary_mask = cv2.dilate(boundary_mask, kernel, iterations=1)
+            result[boundary_mask > 0] = bg_color
+
             marker_count += 1
             if debug:
-                print(f"  圆形标记 #{marker_count}: 圆心=({int(x)},{int(y)}), 半径={radius:.1f}, 圆形度={circularity:.2f}")
+                print(f"  圆形标记 #{marker_count}: 圆心=({cx},{cy}), 半径={r}, "
+                      f"圆形度={circularity:.2f}, 背景色={bg_color}")
 
     if debug and marker_count > 0:
-        print(f"共处理 {marker_count} 个红色圆形标记（内部已转黑色）")
-        cvshow(result, "标记内部转黑色后的图像")
+        print(f"共处理 {marker_count} 个红色圆形标记（仅移除红色边界线）")
+        cvshow(result, "移除红色边界后的图像")
 
     return result
 
