@@ -52,7 +52,7 @@ def format_area(area_px, scale=1.0, unit="px²"):
 
 def remove_red_circular_markers(img, debug=False, min_radius=5, max_radius_ratio=0.1):
     """
-    预处理：检测并移除图像中的红色圆形标识（含内部白色字母）
+    预处理：检测红色圆形标识并将其内部（含字母）转换为黑色
     这些标识通常是设计图中的房间编号、区域标签等，不应被分割为独立区域
 
     步骤：
@@ -60,8 +60,7 @@ def remove_red_circular_markers(img, debug=False, min_radius=5, max_radius_ratio
     2. 创建红色区域掩码（红色在 HSV 中分布在 0° 和 180° 附近）
     3. 查找红色区域的轮廓
     4. 根据圆形度过滤，找到圆形标记
-    5. 膨胀覆盖内部白色文字
-    6. 用图像修复（inpaint）移除这些标记
+    5. 将圆形内部填充为黑色（使该区域融入周围黑色边缘线）
 
     参数:
         img: 输入图像 (BGR)
@@ -93,8 +92,7 @@ def remove_red_circular_markers(img, debug=False, min_radius=5, max_radius_ratio
     # 查找红色区域轮廓
     contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # 收集需要移除的圆形标记
-    remove_mask = np.zeros((h, w), np.uint8)
+    result = img.copy()
     marker_count = 0
 
     for cnt in contours:
@@ -112,27 +110,19 @@ def remove_red_circular_markers(img, debug=False, min_radius=5, max_radius_ratio
         (x, y), radius = cv2.minEnclosingCircle(cnt)
 
         if circularity > 0.5 and min_radius < radius < max_radius:
-            # 这是一个圆形标记，膨胀以覆盖内部文字
-            cv2.drawContours(remove_mask, [cnt], -1, 255, -1)
-            # 再膨胀一圈确保覆盖白色文字
-            cv2.circle(remove_mask, (int(x), int(y)), int(radius) + 3, 255, -1)
+            # 这是一个圆形标记
+            # 将内部填充为黑色（缩小一圈避免覆盖红色边界线）
+            fill_radius = max(int(radius) - 2, 1)
+            cv2.circle(result, (int(x), int(y)), fill_radius, (0, 0, 0), -1)
             marker_count += 1
             if debug:
-                print(f"  发现圆形标记 #{marker_count}: 圆心=({int(x)},{int(y)}), 半径={radius:.1f}, 圆形度={circularity:.2f}")
+                print(f"  圆形标记 #{marker_count}: 圆心=({int(x)},{int(y)}), 半径={radius:.1f}, 圆形度={circularity:.2f}")
 
-    if marker_count == 0:
-        return img  # 没有找到红色圆形标记
+    if debug and marker_count > 0:
+        print(f"共处理 {marker_count} 个红色圆形标记（内部已转黑色）")
+        cvshow(result, "标记内部转黑色后的图像")
 
-    if debug:
-        print(f"共检测到 {marker_count} 个红色圆形标记")
-        cvshow(remove_mask, "待移除的标记区域")
-
-    # 用图像修复移除标记（用周围像素填充）
-    inpainted = cv2.inpaint(img, remove_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
-    if debug:
-        cvshow(inpainted, "移除标记后的图像")
-
-    return inpainted
+    return result
 
 def method_canny_edge_decomposition(img, debug=False, scale=1.0, unit="px²",
                                      canny_low=50, canny_high=150,
@@ -143,7 +133,7 @@ def method_canny_edge_decomposition(img, debug=False, scale=1.0, unit="px²",
     适用于：边缘清晰连续的设计图
 
     步骤：
-    0. [可选] 检测并移除红色圆形标识（房间号等标签）
+    0. [可选] 检测红色圆形标识，将其内部转为黑色（使标签融入所在区域）
     1. 灰度化 + 高斯模糊去噪
     2. Canny 检测边缘
     3. 形态学 CLOSE 操作闭合边缘间隙
