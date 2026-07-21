@@ -50,18 +50,100 @@ def format_area(area_px, scale=1.0, unit="px²"):
         return area_px, physical, f"{physical:.6f} {unit}"
 
 
-# ============================================================================
-#  核心处理方法
-# ============================================================================
+def remove_red_circular_markers(img, debug=False, min_radius=5, max_radius_ratio=0.1):
+    """
+    预处理：检测并移除图像中的红色圆形标识（含内部白色字母）
+    这些标识通常是设计图中的房间编号、区域标签等，不应被分割为独立区域
+
+    步骤：
+    1. 转换到 HSV 色彩空间
+    2. 创建红色区域掩码（红色在 HSV 中分布在 0° 和 180° 附近）
+    3. 查找红色区域的轮廓
+    4. 根据圆形度过滤，找到圆形标记
+    5. 膨胀覆盖内部白色文字
+    6. 用图像修复（inpaint）移除这些标记
+
+    参数:
+        img: 输入图像 (BGR)
+        debug: 是否显示中间步骤
+        min_radius: 最小圆形半径（像素）
+        max_radius_ratio: 最大半径占图像短边的比例
+    """
+    h, w = img.shape[:2]
+    max_radius = max(int(min(h, w) * max_radius_ratio), min_radius + 1)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+    # 红色在 HSV 中分布在两个区间：[0,10] 和 [170,180]
+    lower_red1 = np.array([0, 50, 50])
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([170, 50, 50])
+    upper_red2 = np.array([180, 255, 255])
+
+    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    red_mask = cv2.bitwise_or(mask1, mask2)
+
+    # 形态学开运算去除噪点
+    kernel = np.ones((3, 3), np.uint8)
+    red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+
+    if debug:
+        cvshow(red_mask, "红色区域掩码")
+
+    # 查找红色区域轮廓
+    contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # 收集需要移除的圆形标记
+    remove_mask = np.zeros((h, w), np.uint8)
+    marker_count = 0
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < np.pi * min_radius * min_radius:
+            continue
+
+        # 计算圆形度：4πA / P²，圆形越接近1
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter == 0:
+            continue
+        circularity = 4 * np.pi * area / (perimeter * perimeter)
+
+        # 获取最小外接圆
+        (x, y), radius = cv2.minEnclosingCircle(cnt)
+
+        if circularity > 0.5 and min_radius < radius < max_radius:
+            # 这是一个圆形标记，膨胀以覆盖内部文字
+            cv2.drawContours(remove_mask, [cnt], -1, 255, -1)
+            # 再膨胀一圈确保覆盖白色文字
+            cv2.circle(remove_mask, (int(x), int(y)), int(radius) + 3, 255, -1)
+            marker_count += 1
+            if debug:
+                print(f"  发现圆形标记 #{marker_count}: 圆心=({int(x)},{int(y)}), 半径={radius:.1f}, 圆形度={circularity:.2f}")
+
+    if marker_count == 0:
+        return img  # 没有找到红色圆形标记
+
+    if debug:
+        print(f"共检测到 {marker_count} 个红色圆形标记")
+        cvshow(remove_mask, "待移除的标记区域")
+
+    # 用图像修复移除标记（用周围像素填充）
+    inpainted = cv2.inpaint(img, remove_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+    if debug:
+        cvshow(inpainted, "移除标记后的图像")
+
+    return inpainted
 
 def method_canny_edge_decomposition(img, debug=False, scale=1.0, unit="px²",
                                      canny_low=50, canny_high=150,
-                                     min_area=50, close_kernel=5):
+                                     min_area=50, close_kernel=5,
+                                     remove_markers=True):
     """
     方法一：Canny 边缘检测 + 形态学闭合 → 提取封闭区域
     适用于：边缘清晰连续的设计图
 
     步骤：
+    0. [可选] 检测并移除红色圆形标识（房间号等标签）
     1. 灰度化 + 高斯模糊去噪
     2. Canny 检测边缘
     3. 形态学 CLOSE 操作闭合边缘间隙
@@ -71,6 +153,10 @@ def method_canny_edge_decomposition(img, debug=False, scale=1.0, unit="px²",
     7. 连通域分析 / 轮廓检测提取每个区域
     8. 计算并标注每个区域的面积
     """
+    # 0. 预处理：移除红色圆形标记（如房间编号、区域标签）
+    if remove_markers:
+        img = remove_red_circular_markers(img, debug=debug)
+
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
 
@@ -355,7 +441,8 @@ def print_report(results, image_name="", scale=1.0, unit="px²"):
 
 def process_image(file_path, method="canny", debug=False, scale=1.0, unit="px²",
                   min_area=50, save_output=None,
-                  canny_low=50, canny_high=150, close_kernel=5):
+                  canny_low=50, canny_high=150, close_kernel=5,
+                  remove_markers=True):
     """
     处理单张图像
 
@@ -370,6 +457,7 @@ def process_image(file_path, method="canny", debug=False, scale=1.0, unit="px²"
         canny_low: Canny 低阈值
         canny_high: Canny 高阈值
         close_kernel: 形态学闭合核大小
+        remove_markers: 是否预处理移除红色圆形标记
     """
     img = cv2.imread(file_path)
     if img is None:
@@ -379,12 +467,17 @@ def process_image(file_path, method="canny", debug=False, scale=1.0, unit="px²"
     print(f"\n处理图像: {file_path}")
     print(f"图像尺寸: {img.shape[1]} x {img.shape[0]}")
 
+    # 预处理：移除红色圆形标记（如房间编号、区域标签）
+    if remove_markers:
+        img = remove_red_circular_markers(img, debug=debug)
+
     # 选择方法
     if method == "canny":
         results, edge_img, region_img = method_canny_edge_decomposition(
             img, debug, scale, unit,
             canny_low=canny_low, canny_high=canny_high,
-            min_area=min_area, close_kernel=close_kernel
+            min_area=min_area, close_kernel=close_kernel,
+            remove_markers=False   # 已在外部预处理
         )
     elif method == "adaptive":
         results, edge_img, region_img = method_adaptive_threshold(
@@ -500,6 +593,8 @@ if __name__ == "__main__":
                         help="Canny 高阈值 (默认: 150)")
     parser.add_argument("--close-kernel", type=int, default=5,
                         help="形态学闭合核大小 (默认: 5)")
+    parser.add_argument("--no-remove-markers", action="store_true",
+                        help="不移除红色圆形标记（默认自动移除）")
 
     args = parser.parse_args()
 
@@ -515,5 +610,6 @@ if __name__ == "__main__":
             args.input, args.method, args.debug,
             args.scale, args.unit, args.min_area, save_path,
             canny_low=args.canny_low, canny_high=args.canny_high,
-            close_kernel=args.close_kernel
+            close_kernel=args.close_kernel,
+            remove_markers=not args.no_remove_markers
         )
